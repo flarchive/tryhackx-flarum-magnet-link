@@ -1,0 +1,301 @@
+import Extend from 'flarum/common/extenders';
+import app from 'flarum/admin/app';
+
+export default [
+    new Extend.Admin()
+        // --- Widoczność ---
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.guest_visible',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.guest_visible_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.guest_visible_help', {}, true),
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.activated_only',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.activated_only_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.activated_only_help', {}, true),
+        }))
+
+        // --- Scraper ---
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.scraper_enabled',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_enabled_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_enabled_help', {}, true),
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.scraper_engine',
+            type: 'select',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_engine_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_engine_help', {}, true),
+            options: {
+                hardened: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_engine_hardened', {}, true),
+                classic: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_engine_classic', {}, true),
+            },
+            default: 'hardened',
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.http_only',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.http_only_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.http_only_help', {}, true),
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.allow_private_trackers',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.allow_private_trackers_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.allow_private_trackers_help', {}, true),
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.check_all',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.check_all_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.check_all_help', {}, true),
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.display_type',
+            type: 'select',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.display_type_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.display_type_help', {}, true),
+            options: {
+                average: app.translator.trans('tryhackx-magnet-link.admin.settings.display_type_average', {}, true),
+                average_max_downloads: app.translator.trans('tryhackx-magnet-link.admin.settings.display_type_average_max', {}, true),
+                max_all: app.translator.trans('tryhackx-magnet-link.admin.settings.display_type_max_all', {}, true),
+            },
+            default: 'average',
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.tracker_timeout',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.tracker_timeout_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.tracker_timeout_help', {}, true),
+            min: 1,
+            max: 30,
+            default: 2,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.max_trackers',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.max_trackers_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.max_trackers_help', {}, true),
+            min: 0,
+            max: 50,
+            default: 0,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.topic_scrape_budget',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.topic_scrape_budget_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.topic_scrape_budget_help', {}, true),
+            min: 2,
+            max: 30,
+            default: 15,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.scrape_max_concurrent',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.scrape_max_concurrent_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.scrape_max_concurrent_help', {}, true),
+            min: 1,
+            max: 32,
+            default: 4,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.scraper_max_redirects',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_max_redirects_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_max_redirects_help', {}, true),
+            min: 0,
+            max: 5,
+            default: 0,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.priority_trackers',
+            type: 'textarea',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.priority_trackers_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.priority_trackers_help', {}, true),
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.scraper_host_allowlist',
+            type: 'textarea',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_host_allowlist_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.scraper_host_allowlist_help', {}, true),
+        }))
+
+        // --- Cache wyników ---
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.cache_enabled',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.cache_enabled_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.cache_enabled_help', {}, true),
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.cache_ttl',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.cache_ttl_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.cache_ttl_help', {}, true),
+            min: 0,
+            max: 86400,
+            default: 300,
+        }))
+
+        // --- Limity ręcznego odświeżania ---
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.refresh_cooldown',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.refresh_cooldown_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.refresh_cooldown_help', {}, true),
+            min: 0,
+            max: 86400,
+            default: 30,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.refresh_limit_count',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.refresh_limit_count_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.refresh_limit_count_help', {}, true),
+            min: 0,
+            max: 1000,
+            default: 10,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.refresh_limit_window',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.refresh_limit_window_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.refresh_limit_window_help', {}, true),
+            min: 1,
+            max: 86400,
+            default: 600,
+        }))
+
+        // --- Click tracking ---
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.click_tracking',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.click_tracking_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.click_tracking_help', {}, true),
+        }))
+
+        // --- Tooltip listy dyskusji ---
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.tooltip_enabled',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_enabled_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_enabled_help', {}, true),
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.tooltip_max_magnets',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_max_magnets_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_max_magnets_help', {}, true),
+            min: 0,
+            max: 20,
+            default: 3,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.tooltip_scrape_budget',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_scrape_budget_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_scrape_budget_help', {}, true),
+            min: 2,
+            max: 30,
+            default: 4,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.tooltip_max_concurrent',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_max_concurrent_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_max_concurrent_help', {}, true),
+            min: 1,
+            max: 6,
+            default: 2,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.tooltip_max_trackers',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_max_trackers_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_max_trackers_help', {}, true),
+            min: 0,
+            max: 50,
+            default: 0,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.tooltip_tracker_timeout',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_tracker_timeout_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_tracker_timeout_help', {}, true),
+            min: 0,
+            max: 30,
+            default: 0,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.tooltip_show_permission_errors',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_show_permission_errors_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.tooltip_show_permission_errors_help', {}, true),
+        }))
+
+        // --- Własna nazwa torrenta ---
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.rename_enabled',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.rename_enabled_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.rename_enabled_help', {}, true),
+        }))
+
+        // --- Ban system ---
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.ban_enabled',
+            type: 'boolean',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.ban_enabled_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.ban_enabled_help', {}, true),
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.ban_time',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.ban_time_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.ban_time_help', {}, true),
+            min: 1,
+            max: 1440,
+            default: 20,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.ban_interval',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.ban_interval_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.ban_interval_help', {}, true),
+            min: 1,
+            max: 60,
+            default: 10,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.ban_interval_count',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.ban_interval_count_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.ban_interval_count_help', {}, true),
+            min: 5,
+            max: 1000,
+            default: 100,
+        }))
+        .setting(() => ({
+            setting: 'tryhackx-magnet-link.self_interval',
+            type: 'number',
+            label: app.translator.trans('tryhackx-magnet-link.admin.settings.self_interval_label', {}, true),
+            help: app.translator.trans('tryhackx-magnet-link.admin.settings.self_interval_help', {}, true),
+            min: 1,
+            max: 365,
+            default: 1,
+        }))
+
+        // --- Permissions ---
+        .permission(
+            () => ({
+                icon: 'fas fa-magnet',
+                label: app.translator.trans('tryhackx-magnet-link.admin.permissions.view_magnet_links', {}, true),
+                permission: 'tryhackx-magnet-link.viewMagnetLinks',
+            }),
+            'view',
+            95
+        ),
+];

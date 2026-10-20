@@ -1,0 +1,663 @@
+<?php
+
+namespace TryHackX\MagnetLink\Service;
+
+use Flarum\Settings\SettingsRepositoryInterface;
+use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Cache\Repository;
+use Scrapeer\Scraper;
+use Scrapeer\ScraperViaFix;
+use TryHackX\MagnetLink\Model\MagnetLink;
+use TryHackX\MagnetLink\Support\IntSetting;
+use TryHackX\MagnetLink\Support\PublicIp;
+
+/**
+ * Central tracker-scraping service shared by InfoController and
+ * DiscussionMagnetsController.
+ *
+ * The magnet's tracker list comes from post content, i.e. it is fully
+ * attacker-controlled. On top of the raw Scrapeer call this service therefore
+ * adds the safety and feature layers the controllers used to lack:
+ *
+ *  - SSRF guard ({@see hostIsPublic}) — refuses trackers whose host resolves
+ *    to a loopback / private / link-local / reserved address (LAN services,
+ *    cloud metadata, …) unless the admin explicitly opts in via
+ *    `allow_private_trackers`. Without this a post could make the server issue
+ *    requests to internal hosts.
+ *  - Hard limits — caps the number of trackers actually contacted
+ *    ({@see HARD_TRACKER_CAP}) and enforces a wall-clock budget
+ *    ({@see HARD_TIME_BUDGET}, plus an optional caller-shared deadline) so a
+ *    single magnet — or a tooltip full of them — can't tie up a PHP-FPM worker.
+ *  - check_all / display_type — optionally queries every allowed tracker and
+ *    aggregates seeders/leechers/completed instead of stopping at the first
+ *    responder (these admin settings previously did nothing).
+ *  - Result cache — stores the computed payload per info-hash for a
+ *    configurable, admin-toggleable TTL so repeated views/hovers don't re-hit
+ *    the trackers (also the main brake on the hover-driven load).
+ *
+ * The returned payload keeps the exact shape the controllers already emitted
+ * ({success, seeders, leechers, completed} or {success:false, error_type,
+ * message}), so the frontend and other extensions are unaffected.
+ */
+class TrackerScraper
+{
+    /** Absolute ceiling on trackers contacted per magnet, whatever the settings say. */
+    private const HARD_TRACKER_CAP = 12;
+
+    /**
+     * Absolute ceiling on trackers *examined* per magnet (DNS-resolved by the
+     * SSRF guard, then maybe scraped). Higher than HARD_TRACKER_CAP so a few
+     * blocked/dead hosts don't use up the contact budget, but still bounded so
+     * a magnet stuffed with hundreds of hosts can't cause endless lookups.
+     */
+    private const HARD_CONSIDER_CAP = 25;
+
+    /**
+     * Absolute wall-clock ceiling (seconds) for scraping a single magnet — the
+     * hard anti-DoS cap that bounds a PHP-FPM worker no matter what. The per-view
+     * budgets the controllers pass as $deadline (tooltip_scrape_budget default 4,
+     * topic_scrape_budget default 15) sit BELOW this and are clamped to it, so an
+     * admin can lengthen a scrape up to here but never past it. Public so those
+     * controllers can clamp their settings against one source of truth.
+     */
+    public const HARD_TIME_BUDGET = 30.0;
+
+    /**
+     * Default for `scrape_max_concurrent`: how many uncached scrapes may run at once
+     * server-wide ({@see acquireScrapeSlot}), and the ceiling an admin can raise it to.
+     */
+    public const DEFAULT_MAX_CONCURRENT = 4;
+    private const MAX_CONCURRENT_CEILING = 32;
+
+    /**
+     * Max TTL (seconds) for cached *failures*. Kept short so a transient miss —
+     * e.g. a tooltip that ran out of its shared time budget before reaching a
+     * tracker — recovers quickly (and the full-budget in-post view isn't stuck
+     * with it), while still throttling repeated hits to genuinely dead trackers.
+     */
+    private const FAILURE_CACHE_TTL = 30;
+
+    /** Zmemoizowana (na czas żądania) znormalizowana lista hostów priorytetowych. */
+    private ?array $priorityHostsCache = null;
+
+    /** Zmemoizowana znormalizowana biała lista hostów trackerów (opt-in, audyt M1). */
+    private ?array $allowlistHostsCache = null;
+
+    public function __construct(
+        protected SettingsRepositoryInterface $settings,
+        protected Repository $cache
+    ) {
+    }
+
+    /**
+     * Build the `scrape` payload for a magnet, or null when scraping is
+     * globally disabled.
+     *
+     * @param float|null $deadline Optional shared unix timestamp (microtime)
+     *   so a caller scraping several magnets (the tooltip) can bound the total
+     *   time across all of them.
+     * @param bool $bypassCache Skip the cached value (the manual refresh button)
+     *   but still refresh and store it.
+     * @param int|null $maxTrackersOverride Per-call override for the number of
+     *   trackers contacted (the tooltip passes its own `tooltip_max_trackers`);
+     *   null or ≤0 inherits the global `max_trackers`. It is part of the cache
+     *   key, so a tooltip that contacts fewer trackers can't poison the topic's
+     *   full result (and vice versa).
+     * @param int|null $timeoutOverride Per-call per-tracker timeout override
+     *   (the tooltip's `tooltip_tracker_timeout`); null or ≤0 inherits the
+     *   global `tracker_timeout`. NOT part of the cache key (like the global
+     *   timeout it only affects success/failure timing, not the values).
+     */
+    public function scrapeForMagnet(MagnetLink $magnet, ?float $deadline = null, bool $bypassCache = false, ?int $maxTrackersOverride = null, ?int $timeoutOverride = null): ?array
+    {
+        if (! (bool) $this->settings->get('tryhackx-magnet-link.scraper_enabled', true)) {
+            return null;
+        }
+
+        // Resolve the EFFECTIVE raw max-trackers / timeout once (override wins
+        // when >0, else the global setting) so the cache key and the scrape can
+        // never diverge.
+        $maxRaw = ($maxTrackersOverride !== null && $maxTrackersOverride > 0)
+            ? $maxTrackersOverride
+            : IntSetting::get($this->settings, 'tryhackx-magnet-link.max_trackers', 0);
+        $timeoutRaw = ($timeoutOverride !== null && $timeoutOverride > 0)
+            ? $timeoutOverride
+            : IntSetting::get($this->settings, 'tryhackx-magnet-link.tracker_timeout', 2);
+
+        $cacheEnabled = (bool) $this->settings->get('tryhackx-magnet-link.cache_enabled', true);
+        $cacheKey = $this->cacheKey($magnet, $maxRaw, $timeoutRaw);
+
+        if ($cacheEnabled && ! $bypassCache) {
+            $cached = $this->cache->get($cacheKey);
+            if (is_array($cached)) {
+                return $cached;
+            }
+        }
+
+        $candidates = $this->candidateTrackers($magnet);
+
+        // Contacting trackers holds this PHP worker for up to its time budget, and an
+        // aborted request (the tooltip cancels its hover on mouseleave) doesn't stop
+        // it. With every slot taken, answer at once — uncached, the frontend retries —
+        // rather than letting hovers / views of many uncached magnets tie up the whole
+        // pool. A magnet with nothing to contact needs no slot.
+        $slot = $candidates ? $this->acquireScrapeSlot() : null;
+        if ($slot === false) {
+            return [
+                'success' => false,
+                'error_type' => 'busy',
+                'message' => 'Tracker statistics are busy, try again in a moment',
+            ];
+        }
+
+        try {
+            $result = $this->computeScrape($magnet, $candidates, $deadline, $maxRaw, $timeoutRaw);
+        } finally {
+            $slot?->release();
+        }
+
+        if ($cacheEnabled) {
+            $ttl = IntSetting::get($this->settings, 'tryhackx-magnet-link.cache_ttl', 300);
+            if ($ttl > 0) {
+                // Cache successes for the full TTL; failures only briefly so a
+                // transient miss doesn't stick around (see FAILURE_CACHE_TTL).
+                $effectiveTtl = ! empty($result['success']) ? $ttl : min($ttl, self::FAILURE_CACHE_TTL);
+                $this->cache->put($cacheKey, $result, $effectiveTtl);
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Take one of the `scrape_max_concurrent` server-wide slots for an uncached scrape:
+     * cache locks `tryhackx-magnet-link.scrape-slot.N`, shared by every PHP worker (and
+     * every node, with a shared cache store). The lock outlives the hard time budget, so
+     * a worker killed mid-scrape frees its slot on its own.
+     *
+     * @return Lock|null|false the held slot (release it when done); null when the cache
+     *   store can't lock (then nothing is limited); false when every slot is taken
+     */
+    private function acquireScrapeSlot(): Lock|null|false
+    {
+        try {
+            $store = $this->cache->getStore();
+            if (! $store instanceof LockProvider) {
+                return null;
+            }
+
+            $max = IntSetting::get($this->settings, 'tryhackx-magnet-link.scrape_max_concurrent', self::DEFAULT_MAX_CONCURRENT);
+            $max = $max > 0 ? min($max, self::MAX_CONCURRENT_CEILING) : self::DEFAULT_MAX_CONCURRENT;
+            $ttl = (int) self::HARD_TIME_BUDGET + 10;
+
+            // Start at a random slot, so concurrent requests don't all queue up on slot 0.
+            $first = random_int(0, $max - 1);
+            for ($i = 0; $i < $max; $i++) {
+                $lock = $store->lock('tryhackx-magnet-link.scrape-slot.' . (($first + $i) % $max), $ttl);
+                if ($lock->get()) {
+                    return $lock;
+                }
+            }
+
+            return false;
+        } catch (\Throwable $e) {
+            // A failing lock backend must not switch tracker stats off.
+            return null;
+        }
+    }
+
+    private function cacheKey(MagnetLink $magnet, int $maxRaw, int $timeoutRaw): string
+    {
+        // Każde ustawienie, które zmienia KTÓRE trackery są odpytywane lub JAK
+        // wyniki są agregowane, musi być częścią klucza — inaczej zmiana
+        // ustawienia działałaby dopiero po wygaśnięciu TTL. Dotyczy to zwłaszcza
+        // allow_private_trackers: to przełącznik bezpieczeństwa, więc po jego
+        // wyłączeniu nie wolno dalej serwować wyników zebranych według starej
+        // polityki.
+        $parts = [
+            (string) $this->settings->get('tryhackx-magnet-link.display_type', 'average'),
+            (bool) $this->settings->get('tryhackx-magnet-link.check_all', false) ? 'all' : 'first',
+            (bool) $this->settings->get('tryhackx-magnet-link.http_only', false) ? 'http' : 'any',
+            (bool) $this->settings->get('tryhackx-magnet-link.allow_private_trackers', false) ? 'priv' : 'pub',
+            // Efektywny max-trackers TEGO wywołania (tooltip może mieć własny limit
+            // — patrz scrapeForMagnet). W kluczu, by wynik tooltipa z innym limitem
+            // nie zatruł pełnego wyniku w temacie.
+            'm' . $maxRaw,
+            // Efektywny per-tracker timeout TEGO wywołania. Przy check_all=true krótszy
+            // timeout = mniej trackerów zdąży = inna agregacja (inne wartości), więc
+            // gdy tooltip ma własny tooltip_tracker_timeout ≠ globalnego, MUSI mieć
+            // osobny wpis (inaczej zatruwałby temat na cały cache_ttl). Przy domyślnych
+            // (tooltip dziedziczy globalny) timeouty są równe → ten sam klucz → współdzielą.
+            't' . $timeoutRaw,
+            // Lista priorytetowa zmienia „pierwszego respondera" → też w kluczu.
+            $this->priorityFingerprint(),
+            // Biała lista zmienia KTÓRE hosty są odpytywane → też w kluczu (audyt M1).
+            $this->allowlistHosts() === [] ? 'a0' : 'a' . substr(sha1(implode(',', $this->allowlistHosts())), 0, 10),
+        ];
+
+        return 'tryhackx-magnet-link.scrape.' . strtolower($magnet->info_hash) . '.' . implode('.', $parts);
+    }
+
+    /** @param array<int, string>|null $candidates {@see candidateTrackers} */
+    private function computeScrape(MagnetLink $magnet, ?array $candidates, ?float $deadline, int $maxRaw, int $timeoutRaw): array
+    {
+        if ($candidates === null) {
+            return [
+                'success' => false,
+                'error_type' => 'no_trackers',
+                'message' => 'Magnet link contains no trackers',
+            ];
+        }
+
+        if (empty($candidates)) {
+            // Had trackers, but none with a usable scheme (http/https/udp,
+            // minus udp when http_only is on).
+            return [
+                'success' => false,
+                'error_type' => 'no_http_trackers',
+                'message' => 'No usable trackers available',
+            ];
+        }
+
+        // Efektywny per-tracker timeout i limit trackerów (już rozwinięte z
+        // override'ów tooltipa lub globalnych ustawień w scrapeForMagnet).
+        $timeout = $timeoutRaw > 0 ? min($timeoutRaw, 30) : 2;
+        $maxTrackers = $maxRaw > 0 ? min($maxRaw, self::HARD_TRACKER_CAP) : self::HARD_TRACKER_CAP;
+
+        $checkAll = (bool) $this->settings->get('tryhackx-magnet-link.check_all', false);
+        $allowPrivate = (bool) $this->settings->get('tryhackx-magnet-link.allow_private_trackers', false);
+        // Liczba przekierowań HTTP do podążenia (np. tracker za Cloudflare robi
+        // http→https). Każdy hop i tak jest walidowany guardem SSRF (niżej).
+        $maxRedirects = max(0, min(IntSetting::get($this->settings, 'tryhackx-magnet-link.scraper_max_redirects', 0), 5));
+
+        // Never let one magnet run past the absolute ceiling, even if the
+        // caller passed a more generous shared deadline.
+        $hardDeadline = microtime(true) + self::HARD_TIME_BUDGET;
+        $budgetDeadline = $deadline !== null ? min($deadline, $hardDeadline) : $hardDeadline;
+
+        $infoHash = $magnet->info_hash;
+        $collected = [];
+        $contacted = 0;
+        $considered = 0;
+        $blockedAny = false;
+
+        foreach ($candidates as $tracker) {
+            if ($contacted >= $maxTrackers
+                || $considered >= self::HARD_CONSIDER_CAP
+                || microtime(true) >= $budgetDeadline) {
+                break;
+            }
+            $considered++;
+
+            $host = (string) parse_url($tracker, PHP_URL_HOST);
+
+            // Opcjonalna BIAŁA LISTA zaufanych hostów trackerów (audyt M1/#1): gdy
+            // ustawiona, odpytujemy WYŁĄCZNIE wskazane hosty, więc tracker podstawiony
+            // przez autora posta (wektor SSRF / DNS-rebinding) nie jest w ogóle
+            // kontaktowany. Domyślnie pusta = bez ograniczeń (zachowanie jak dotąd).
+            $allowlist = $this->allowlistHosts();
+            if ($allowlist !== [] && ! in_array(strtolower(trim($host, '[]')), $allowlist, true)) {
+                $blockedAny = true;
+                continue;
+            }
+
+            // SSRF guard (resolves DNS) — kept inside the capped/timed loop so
+            // a magnet stuffed with hosts can't cause unbounded resolution; the
+            // accumulated time is bounded by the deadline check above.
+            if (! $allowPrivate && ! $this->hostIsPublic($host)) {
+                $blockedAny = true;
+                continue;
+            }
+
+            // Cap this single attempt to the time left in the budget, so one
+            // slow tracker can't overrun it.
+            $remaining = $budgetDeadline - microtime(true);
+            if ($remaining < 1.0) {
+                break;
+            }
+            $callTimeout = max(1, (int) min($timeout, (int) ceil($remaining)));
+
+            $data = $this->scrapeSingle($infoHash, $tracker, $callTimeout, $maxRedirects, $allowPrivate);
+            $contacted++;
+
+            if ($data !== null) {
+                $collected[] = $data;
+
+                // Legacy behaviour: stop at the first tracker that answers.
+                if (! $checkAll) {
+                    break;
+                }
+            }
+        }
+
+        if (empty($collected)) {
+            // Everything we looked at was blocked by the SSRF guard → report it
+            // as "no usable trackers" rather than "no response".
+            if ($contacted === 0 && $blockedAny) {
+                return [
+                    'success' => false,
+                    'error_type' => 'no_http_trackers',
+                    'message' => 'No usable trackers available',
+                ];
+            }
+
+            return [
+                'success' => false,
+                'error_type' => 'no_response',
+                'message' => 'No tracker responded',
+            ];
+        }
+
+        return ['success' => true] + $this->aggregate($collected);
+    }
+
+    /**
+     * Tracker URLs that pass the cheap scheme / http_only filters (no DNS).
+     * The SSRF host check is applied later, inside the capped scrape loop.
+     *
+     * @return array<int, string>|null  Candidate tracker URLs, an empty array
+     *   if the magnet had trackers but none with a usable scheme, or null if it
+     *   has no tracker parameters at all.
+     */
+    private function candidateTrackers(MagnetLink $magnet): ?array
+    {
+        $trackers = $magnet->getTrackers();
+        if (empty($trackers)) {
+            return null;
+        }
+
+        $httpOnly = (bool) $this->settings->get('tryhackx-magnet-link.http_only', false);
+
+        $candidates = [];
+        foreach ($trackers as $tracker) {
+            $parts = parse_url($tracker);
+            if ($parts === false || empty($parts['scheme']) || empty($parts['host'])) {
+                continue;
+            }
+
+            $scheme = strtolower($parts['scheme']);
+            if (! in_array($scheme, ['http', 'https', 'udp'], true)) {
+                continue;
+            }
+            if ($httpOnly && $scheme === 'udp') {
+                continue;
+            }
+
+            $candidates[] = $tracker;
+        }
+
+        return $this->prioritize($candidates);
+    }
+
+    /**
+     * Ułóż kandydatów tak, by trackery z listy priorytetowej admina były na
+     * początku (w kolejności z listy), a reszta zachowała dotychczasową
+     * kolejność. To czysty reorder istniejących trackerów — nic nie dodaje.
+     * Liczy się głównie przy check_all=false (lepszy „pierwszy responder")
+     * oraz gdy capy/budżet obetną listę (lepszy dobór odpytywanych).
+     *
+     * @param array<int, string> $candidates
+     * @return array<int, string>
+     */
+    private function prioritize(array $candidates): array
+    {
+        $priority = $this->priorityHosts();
+        if ($priority === [] || count($candidates) < 2) {
+            return $candidates;
+        }
+
+        $rank = array_flip($priority); // host => pozycja (0 = najwyższy priorytet)
+
+        $decorated = [];
+        foreach ($candidates as $i => $tracker) {
+            $host = $this->hostFromTrackerString($tracker);
+            $r = ($host !== null && isset($rank[$host])) ? $rank[$host] : PHP_INT_MAX;
+            $decorated[] = [$r, $i, $tracker]; // $i = stabilny tie-breaker
+        }
+
+        usort($decorated, static fn (array $a, array $b): int => [$a[0], $a[1]] <=> [$b[0], $b[1]]);
+
+        return array_map(static fn (array $d): string => $d[2], $decorated);
+    }
+
+    /**
+     * Znormalizowana (lowercase, bez portu/ścieżki) lista hostów z ustawienia
+     * `priority_trackers` — jeden wpis na linię. Memoizowana na czas żądania.
+     *
+     * @return array<int, string>
+     */
+    private function priorityHosts(): array
+    {
+        if ($this->priorityHostsCache !== null) {
+            return $this->priorityHostsCache;
+        }
+
+        $raw = (string) $this->settings->get('tryhackx-magnet-link.priority_trackers', '');
+        if (trim($raw) === '') {
+            return $this->priorityHostsCache = [];
+        }
+
+        $seen = [];
+        $hosts = [];
+        foreach (preg_split('/\r\n|\r|\n/', $raw) ?: [] as $line) {
+            $host = $this->hostFromTrackerString($line);
+            if ($host !== null && ! isset($seen[$host])) {
+                $seen[$host] = true;
+                $hosts[] = $host;
+                if (count($hosts) >= 200) {
+                    break; // zdrowy limit — dłuższa lista to konfiguracyjna pomyłka
+                }
+            }
+        }
+
+        return $this->priorityHostsCache = $hosts;
+    }
+
+    /**
+     * Znormalizowana BIAŁA LISTA hostów z ustawienia `scraper_host_allowlist`
+     * (jeden wpis na linię). Pusta = wyłączona (bez ograniczeń — zachowanie jak
+     * dotąd). Gdy niepusta, {@see computeScrape} odpytuje WYŁĄCZNIE te hosty —
+     * opt-in zamknięcie wektora SSRF / DNS-rebinding dla trackerów podstawionych
+     * w treści posta (audyt M1). Memoizowana na czas żądania.
+     *
+     * @return array<int, string>
+     */
+    private function allowlistHosts(): array
+    {
+        if ($this->allowlistHostsCache !== null) {
+            return $this->allowlistHostsCache;
+        }
+
+        $raw = (string) $this->settings->get('tryhackx-magnet-link.scraper_host_allowlist', '');
+        if (trim($raw) === '') {
+            return $this->allowlistHostsCache = [];
+        }
+
+        $seen = [];
+        $hosts = [];
+        foreach (preg_split('/\r\n|\r|\n/', $raw) ?: [] as $line) {
+            $host = $this->hostFromTrackerString($line);
+            if ($host !== null && ! isset($seen[$host])) {
+                $seen[$host] = true;
+                $hosts[] = $host;
+                if (count($hosts) >= 200) {
+                    break; // zdrowy limit — dłuższa lista to konfiguracyjna pomyłka
+                }
+            }
+        }
+
+        return $this->allowlistHostsCache = $hosts;
+    }
+
+    /**
+     * Wyciągnij sam host (lowercase, bez nawiasów IPv6) z trackera podanego
+     * jako pełny URL, host:port, host/ścieżka albo goły host.
+     */
+    private function hostFromTrackerString(string $raw): ?string
+    {
+        $raw = trim($raw);
+        if ($raw === '') {
+            return null;
+        }
+
+        // parse_url potrzebuje schematu; dla gołego hosta podstawiamy "//".
+        $forParse = str_contains($raw, '://') ? $raw : '//' . ltrim($raw, '/');
+        $host = parse_url($forParse, PHP_URL_HOST);
+
+        if (! is_string($host) || $host === '') {
+            return null;
+        }
+
+        return strtolower(trim($host, '[]'));
+    }
+
+    /**
+     * Krótki odcisk listy priorytetowej do klucza cache (zmiana listy zmienia
+     * „pierwszego respondera", więc musi unieważniać cache).
+     */
+    private function priorityFingerprint(): string
+    {
+        $hosts = $this->priorityHosts();
+
+        return $hosts === [] ? 'p0' : 'p' . substr(sha1(implode(',', $hosts)), 0, 10);
+    }
+
+    /**
+     * True when every address the host resolves to is public and routable.
+     *
+     * Blocks IP literals and hostnames that point at loopback / private /
+     * link-local / reserved ranges — the SSRF surface. A host that fails to
+     * resolve is treated as not-public (skipped): it is a dead tracker anyway.
+     *
+     * Residual risk: DNS rebinding (host resolves public here but private when
+     * Scrapeer re-resolves at fetch time) is not covered. Fully closing that
+     * would require pinning the resolved IP through the request, which the
+     * BitTorrent scrape path (Host header / TLS SNI / UDP connect) does not
+     * allow cleanly. The window is already narrowed by the conservative defaults
+     * the audit floated as the partial mitigation — `tracker_timeout` defaults to
+     * 2 s and `scraper_max_redirects` to 0 (audyt #10).
+     */
+    private function hostIsPublic(string $host): bool
+    {
+        $host = trim($host, '[]'); // strip IPv6 literal brackets
+
+        $ips = [];
+        if (filter_var($host, FILTER_VALIDATE_IP)) {
+            $ips = [$host];
+        } else {
+            $v4 = @gethostbynamel($host);
+            if (is_array($v4)) {
+                $ips = $v4;
+            }
+            $aaaa = @dns_get_record($host, DNS_AAAA);
+            if (is_array($aaaa)) {
+                foreach ($aaaa as $record) {
+                    if (! empty($record['ipv6'])) {
+                        $ips[] = $record['ipv6'];
+                    }
+                }
+            }
+        }
+
+        if (empty($ips)) {
+            return false;
+        }
+
+        foreach ($ips as $ip) {
+            if (! PublicIp::isPublic($ip)) {
+                return false; // at least one resolved address is private/reserved/internal
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Scrape a single tracker for a single info-hash.
+     *
+     * @return array{seeders:int, leechers:int, completed:int}|null
+     */
+    private function scrapeSingle(string $infoHash, string $tracker, int $timeout, int $maxRedirects = 0, bool $allowPrivate = false): ?array
+    {
+        try {
+            // Wybór silnika scrapera (ustawienie admina — przełącznik):
+            //  - 'hardened' (DOMYŚLNY) → Scrapeer\ScraperViaFix (PINOWANIE IP zamykające
+            //    DNS-rebinding + dual-stack IPv6 dla UDP),
+            //  - 'classic' → Scrapeer\Scraper (file_get_contents; SSRF-guard hostIsPublic niżej).
+            // Fallback MUSI być 'hardened' — spójny z ->default() w extend.php; gdyby było
+            // 'classic', brak wpisu w ustawieniach po cichu degradowałby do mniej bezpiecznego silnika.
+            $engine = (string) $this->settings->get('tryhackx-magnet-link.scraper_engine', 'hardened');
+            $scraper = $engine === 'classic' ? new Scraper() : new ScraperViaFix();
+            $scraper->set_max_redirects($maxRedirects);
+            if ($maxRedirects > 0) {
+                // Waliduj KAŻDY hop przekierowania tą samą polityką co host
+                // pierwotny — pozwala na http→https (Cloudflare/CDN), ale nie
+                // pozwala przekierować scrapera na adres wewnętrzny (SSRF).
+                $scraper->set_host_validator(fn (string $host): bool => $allowPrivate || $this->hostIsPublic($host));
+            }
+            // Wariant utwardzony pinuje IP — przekaż mu admiński opt-in na adresy prywatne
+            // (allow_private_trackers), inaczej blokowałby też celowo dozwolone wewnętrzne.
+            if ($scraper instanceof ScraperViaFix) {
+                $scraper->set_allow_private($allowPrivate);
+            }
+            $result = $scraper->scrape($infoHash, [$tracker], null, $timeout, false);
+        } catch (\Throwable $e) {
+            return null;
+        }
+
+        if (empty($result[$infoHash])) {
+            return null;
+        }
+
+        $data = $result[$infoHash];
+
+        return [
+            'seeders' => (int) ($data['seeders'] ?? 0),
+            'leechers' => (int) ($data['leechers'] ?? 0),
+            'completed' => (int) ($data['completed'] ?? 0),
+        ];
+    }
+
+    /**
+     * Aggregate per-tracker rows according to the display_type setting.
+     *
+     * @param array<int, array{seeders:int, leechers:int, completed:int}> $rows
+     * @return array{seeders:int, leechers:int, completed:int}
+     */
+    private function aggregate(array $rows): array
+    {
+        $mode = (string) $this->settings->get('tryhackx-magnet-link.display_type', 'average');
+
+        $seeders = array_column($rows, 'seeders');
+        $leechers = array_column($rows, 'leechers');
+        $completed = array_column($rows, 'completed');
+
+        $avg = fn (array $values): int => empty($values) ? 0 : (int) round(array_sum($values) / count($values));
+        $max = fn (array $values): int => empty($values) ? 0 : (int) max($values);
+
+        switch ($mode) {
+            case 'max_all':
+                return [
+                    'seeders' => $max($seeders),
+                    'leechers' => $max($leechers),
+                    'completed' => $max($completed),
+                ];
+
+            case 'average_max_downloads':
+                return [
+                    'seeders' => $avg($seeders),
+                    'leechers' => $avg($leechers),
+                    'completed' => $max($completed),
+                ];
+
+            case 'average':
+            default:
+                return [
+                    'seeders' => $avg($seeders),
+                    'leechers' => $avg($leechers),
+                    'completed' => $avg($completed),
+                ];
+        }
+    }
+}

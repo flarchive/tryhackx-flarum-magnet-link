@@ -1,0 +1,79 @@
+{
+    "name": "tryhackx/flarum-magnet-link",
+    "description": "Secure magnet link integration for Flarum with SHA-256 token protection, SSRF-hardened tracker scraping, live click counters, and an optimized discussion list preview tooltip.",
+    "keywords": [
+        "flarum",
+        "extension",
+        "magnet",
+        "torrent",
+        "bbcode",
+        "tracker",
+        "scraper",
+        "ssrf-protection",
+        "token-security",
+        "click-counter",
+        "tooltip",
+        "backfill"
+    ],
+    "type": "flarum-extension",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "TryHackX",
+            "email": "contact@tryhackx.org",
+            "homepage": "https://github.com/TryHackX"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/TryHackX/flarum-magnet-link/issues",
+        "source": "https://github.com/TryHackX/flarum-magnet-link"
+    },
+    "require": {
+        "php": "^8.3",
+        "flarum/core": "^2.0.2",
+        "s9e/text-formatter": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "TryHackX\\MagnetLink\\": "src/",
+            "Scrapeer\\": "src/Scraper/"
+        }
+    },
+    "require-dev": {
+        "flarum/subscriptions": "^2.0",
+        "flarum/testing": "^2.0"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "TryHackX\\MagnetLink\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": [
+            "@test:unit",
+            "@test:integration"
+        ],
+        "test:unit": "phpunit -c tests/phpunit.unit.xml",
+        "test:integration": "phpunit -c tests/phpunit.integration.xml",
+        "test:setup": "@php tests/integration/setup.php"
+    },
+    "scripts-descriptions": {
+        "test": "Runs all PHP tests.",
+        "test:unit": "Runs the PHP unit tests (JavaScript: node --test js/tests/*.test.mjs).",
+        "test:integration": "Runs the PHP integration tests (needs test:setup once).",
+        "test:setup": "Sets up a database for the integration tests (SQLite by default)."
+    },
+    "extra": {
+        "flarum-extension": {
+            "title": "Magnet Link BBCode",
+            "category": "feature",
+            "icon": {
+                "name": "fas fa-magnet",
+                "color": "#e74c3c",
+                "backgroundColor": "#1a1a2e"
+            }
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
