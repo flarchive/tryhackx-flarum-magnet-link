@@ -2,13 +2,15 @@
 
 > **Read-only archive of released versions of tryhackx/flarum-magnet-link.** Not for installation: use [Packagist](https://packagist.org/packages/tryhackx/flarum-magnet-link) or the [upstream repository](https://github.com/TryHackX/flarum-magnet-link).
 
-**0** versions archived · Latest: [`2.10.2`](https://github.com/flarchive/tryhackx-flarum-magnet-link/tree/archive/v2.10.2) · License: `MIT` · Flarum: `^2.0.2`
+**3** versions archived · Latest: [`2.10.2`](https://github.com/flarchive/tryhackx-flarum-magnet-link/tree/archive/v2.10.2) · License: `MIT` · Flarum: `^2.0.2`
 
 ## Archived Versions
 
 | Version | Released | Flarum | Source |
 |---|---|---|---|
-| — | — | — | — |
+| `1.0.8` | 2026-04-23 | `^1.8.0` | [Browse](https://github.com/flarchive/tryhackx-flarum-magnet-link/tree/archive/v1.0.8) |
+| `2.9.1` | 2026-06-20 | `^2.0.0-rc.1` | [Browse](https://github.com/flarchive/tryhackx-flarum-magnet-link/tree/archive/v2.9.1) |
+| `2.10.2` | 2026-10-20 | `^2.0.2` | [Browse](https://github.com/flarchive/tryhackx-flarum-magnet-link/tree/archive/v2.10.2) |
 
 Catalog entry: [packages/tryhackx-flarum-magnet-link.json](https://github.com/flarchive/archive-index/blob/main/packages/tryhackx-flarum-magnet-link.json)
 
